@@ -1,0 +1,202 @@
+pragma solidity ^0.4.0;//version 0.4 or higher
+
+contract PharmaPackage {
+    
+    //participating entities with their respective Ethereum addresses (EA)
+    
+    address public seller; // seller's address
+    address public distributor; // distributor's address
+    address public consumer; //the one who placed order
+    string public pharmacrate;//description of packet's  content
+    address container; // container's address
+    bytes32 public secrtcode; //received secret code when money is deposited
+    string public acquiredCodeToBehashed; 
+
+enum freightState {NotReady, DistributeToConsumer, PharmaPackageReady, FreightReady,ReadyforShippingPackage,
+MoneyDeposited,StartShipment,WaitingforSecretCode, WaitingForCorrectCode, 
+AuthenticatedByConsumer,AuthenticationFailureAborted,FreightReceived, Aborted}  // state of package at different times
+
+freightState public freightstate; 
+string batchNumber;
+   uint startDate;
+   uint receivedAfter;
+   uint freightTariff;
+   
+  //Sensors on the truck's container 
+    enum breachType { None, Temp, Open, Route, Jerk}   
+    breachType public breach; 
+    int result;//1 or 0 indicating the self_check result of package
+    int temperature; //track the tempertaure any integer
+    int opened;   //if the container opens 1 , 0
+    int onTheWay;  //to track the route 1 , 0
+   
+//constructor
+    function PharmaPackage(){
+         batchNumber= "Xrdpf";
+         startDate = block.timestamp;
+         receivedAfter = 3;//3 days maximum for providing another secret code
+         pharmacrate = "This package contains pharmaceutical product";
+         freightTariff = 10 ether;
+         container = 0x583031d1113ad414f02576bd6afabfb302140225;
+         seller = msg.sender; //address of packet sender
+         consumer = 0x4b0897b0513fdc7c541b6d9d7e929c4e5364d2db;
+         freightstate = freightState.NotReady;
+         result = 0;
+    }
+
+//modifiers
+
+modifier  OnlyContainer() {
+     require(msg.sender == container); 
+     _;
+}
+    
+modifier  OnlySeller() {     //only pharma seller 
+     require(seller == msg.sender); 
+     _;
+}
+modifier  OnlyConsumer() { //only consumer
+        require(consumer==msg.sender); 
+        _;
+ }
+ modifier OnlyDistributor() {
+     require(distributor==msg.sender);
+     _;
+      }
+modifier amountsto(){
+     require(freightTariff == msg.value);
+     _;
+}
+    
+//Events
+
+event FreightCreated(address seller, string info);
+event DistributionPrepared(address distributor, string info);
+event CheckingCompleted(string info);
+event CheckCompleted(string info);
+event MoneyDeposited(string info, address consumer);
+event StartedShipping(address sender, string info);
+event FreightArrivedToDestination(string msg, address container);
+event ConsumerSuccessfullyAuthenticated(string msg, address consumer);
+event ConsumerFailedAuthentication(string msg, address consumer);//failure within 72 hours
+event AuthenticationPermFailed(string msg, address consumer);
+event PackageReceived(address consumer);// PackageReceived at consumer end
+event ShipmentCancelledandRefunded(address container);//shipment violated and refund occured
+event PaymentReleased(address sender, string info);
+event ShipmentCancelledandRefunded(address container);
+
+
+// Events involving breach 
+    event TemperatureOutofRequiredRange(string msg, bool t, int br);//temperature out of accepted range
+    event AccidentalContainerOpening(string msg, bool o, int br);
+    event OutofTrack(string msg, bool r, int br);
+    
+//Functions -------------> Pharma Package from Seller to EndConsumers
+
+function createFreight() OnlySeller {
+        require(freightstate == freightState.NotReady);
+         freightstate = freightState.PharmaPackageReady; //once locked the container will do a self check on the sensors
+         FreightCreated(msg.sender, "The freight is ready now!"); //trigger event
+    }
+
+
+function performFreightCheck(int results) OnlyContainer {
+       
+        require(freightstate == freightState.PharmaPackageReady);
+        result = results;
+        
+        if(result == 1){    // result is : Ready
+            freightstate = freightState.FreightReady;
+            CheckingCompleted("Result:Success!");//trigger event with result
+        }
+          else if(result == 0) {
+            freightstate = freightState.Aborted;
+            CheckingCompleted(" Failure: container must be fixed."); //trigger event with result
+             selfdestruct(msg.sender);
+        }
+}
+//Consumer deposits money and send the hash
+  function depositMoneyforFreight(bytes32 hash)  payable  OnlyConsumer amountsto {
+         require(freightstate == freightState.FreightReady);//this indicates that self check is OK
+            freightstate = freightState.MoneyDeposited;
+            secrtcode = hash;
+            MoneyDeposited("Money deposited and secret hash provided" , msg.sender); //trigger event
+    }
+
+  function startShipping() OnlySeller {
+        require(freightstate == freightState.MoneyDeposited);
+            freightstate = freightState.StartShipment;
+            StartedShipping(msg.sender,"Package is shipped!"); //trigger event
+    }
+    
+  function freightArrived() OnlyContainer{//called when the freight arrives to destination
+          require(freightstate == freightState.StartShipment); //only if no violations
+            freightstate = freightState.WaitingforSecretCode;
+            FreightArrivedToDestination("Consumer --> Please provide your secret code now :", msg.sender );
+    }
+  function provideSecretCode(string code) OnlyConsumer {
+     require((freightstate == freightState.WaitingforSecretCode || freightstate == freightState.WaitingForCorrectCode) && breach == breachType.None);
+            acquiredCodeToBehashed = code;
+            if(secrtcode == keccak256(acquiredCodeToBehashed)){//authenticated
+                freightstate = freightState.AuthenticatedByConsumer;
+                ConsumerSuccessfullyAuthenticated("SUCCESS:Secretcode matched", msg.sender);
+            }
+            else {
+                freightstate = freightState.WaitingForCorrectCode;
+                ConsumerFailedAuthentication("You have 72 hours to provide the correct code", msg.sender);
+            }
+        
+      }      
+  function provideCodeLater(string phrase) OnlyConsumer {
+        if (block.timestamp <= startDate + receivedAfter * 1 days) {
+            provideSecretCode(phrase);
+        }
+        else//it will be more than 3 days
+        {
+            freightstate = freightState.AuthenticationFailureAborted;
+            AuthenticationPermFailed("Failure to provide the correct passcode within 72 hours", msg.sender);
+            consumer.transfer(freightTariff/2);//only half of the shipment price is refunded
+            ShipmentCancelledandRefunded(msg.sender);
+            selfdestruct(msg.sender);
+      }  
+    }
+  function unlockPharmaPackage() OnlyContainer {
+         require(freightstate == freightState.AuthenticatedByConsumer);
+                freightstate = freightState.FreightReceived;
+                PackageReceived(msg.sender); //trigger event
+    }
+  function releasePayment() OnlySeller{
+        require(freightstate == freightState.FreightReceived);
+            seller.transfer(freightTariff); //transfer the money to the seller
+            PaymentReleased(msg.sender, "Payment made to Seller");
+            selfdestruct(msg.sender);
+    }
+
+//after breach, a refund 
+    function Recompense() OnlyContainer{
+        require(freightstate == freightState.Aborted);//breach hasn't occured
+        if(breach != breachType.None){
+            consumer.transfer(freightTariff);
+            ShipmentCancelledandRefunded(msg.sender);
+            selfdestruct(msg.sender);
+        }
+    }
+    function breachFound(string msg, breachType br, int value) OnlyContainer{
+        require(freightstate == freightState.StartShipment);
+        breach = br;
+        freightstate = freightState.Aborted;
+        if(breach == breachType.Temp){
+            temperature = value;
+            TemperatureOutofRequiredRange( msg ,true, temperature);
+        }
+        else if(breach == breachType.Open){
+            opened = value;
+            AccidentalContainerOpening(msg, true, opened);
+        }
+        else if(breach == breachType.Route){
+            onTheWay = value;
+            OutofTrack(msg , true, onTheWay);
+        }
+        Recompense();
+}
+}
